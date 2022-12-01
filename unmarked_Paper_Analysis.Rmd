@@ -1,0 +1,490 @@
+---
+title: "The unmarked R package: Twelve years of advances in occurrence and abundance modeling in ecology"
+author: Kenneth F. Kellner
+date: 1 December 2022
+output:
+  html_document:
+    toc: true
+---
+
+# Required packages
+
+To replicate this analysis, you currently need the dev version of `unmarked` from Github.
+You can install it with the `remotes` package:
+
+```{r, eval=FALSE}
+remotes::install_github("rbchan/unmarked", ref="2acf96a")
+```
+
+```{r}
+library(scholar)
+library(unmarked)
+suppressMessages(library(dplyr))
+library(ggplot2)
+```
+
+# Download and summarize unmarked citations
+
+Download article citation records.
+Stats in the paper are based on running this on November 30, 2022.
+
+```{r}
+id <- "HdZX5qUAAAAJ" # Richard Chandler
+art <- get_publications(id, cstart = 0, pagesize = 100, flush = FALSE)
+pub <- as.character(art$pubid[1]) # Select unmarked paper
+stopifnot(pub == "Y0pCki6q_DkC")
+art_dat <- get_article_cite_history(id, pub)
+```
+
+Format citation records:
+
+```{r}
+art_dat$year <- format(as.Date(paste(art_dat$year, 1, 1, sep="-")), "%Y")
+art_dat$year <- as.numeric(art_dat$year)
+art_dat <- art_dat[art_dat$year %in% 2011:2022,]
+stopifnot(nrow(art_dat) == 12)
+```
+
+Stats as of November 30, 2022:
+
+```{r}
+total_cites <- sum(art_dat$cites)
+stopifnot(total_cites >= 2000)
+total_cites # 2100 on 11/30/2022
+
+mean_cites <- mean(art_dat$cites[8:12]) # last 5 years
+stopifnot(mean_cites >= 250)
+mean_cites # 266.4 on 11/30/2022
+```
+
+# ACFL power analysis
+
+## Simulate a dataset similar to real data
+
+We will simulate a combined distance-removal study dataset similar to the real one.
+Ideally this should be done before collecting any data, but for example purposes we do it after.
+The point of creating this dataset is to have a "template" study design and model structure to pass to `powerAnalysis`.
+
+```{r}
+set.seed(1)
+```
+
+Define experimental design:
+
+```{r}
+design <- list(
+  M = 50*15, # number of "sites" (in this case site-years)
+  Jdist = 2,      # number of distance bins
+  Jrem = 3       # number of removal periods
+)
+```
+
+Distance breaks (in meters):
+
+```{r}
+db <- c(0,25,50)
+```
+
+Define models for each parameter using R formulas.
+Habitat and year covariate on lambda, along with a random point effect.
+Both detection models are intercept-only.
+
+```{r}
+forms <- list(lambda = ~Habitat+Year+(1|Point), dist=~1, rem=~1)
+```
+
+In the formulas above we created several covariates (`Habitat`, `Year`, `Point`).
+Now we need to tell `unmarked` how those covariates should be structured.
+We have to do this carefully because we have a repeated years within sites structure to the dataset.
+To customize covariates, we will create a `guide` function for each covariate
+
+First, create a function to generate the `Point` ID covariate.
+Each value is repeated 15 times, once per year.
+
+```{r}
+point_function <- function(n){
+  stopifnot(n %% 15 == 0)
+  sites <- n/15
+  factor(rep(1:sites, each=15))
+}
+```
+
+Next the values for year (each point gets years 0-14):
+
+```{r}
+yr_function <- function(n){
+  stopifnot(n %% 15 == 0)
+  sites <- n/15
+  rep(0:14, sites) # 15 years of surveys
+}
+```
+
+Finally assign one of two habitat types to each point.
+Habitat type stays the same across years.
+
+```{r}
+hab_function <- function(n){
+  stopifnot(n %% 15 == 0)
+  sites <- n/15
+  hab <- sample(c("A","B"), sites, replace=TRUE)
+  factor(rep(hab, each=15))
+}
+```
+
+The functions are combined together into a `guide` list.
+
+```{r}
+guide <- list(Point = list(dist=point_function),
+              Year = list(dist=yr_function),
+              Habitat = list(dist=hab_function))
+```
+
+The last piece of information needed is the actual model parameter values, which need to be on the appropriate transformed scale.
+We are trying to simulate a dataset that reflects our expectations/predictions about reality.
+You could get this information from expert knowledge, pilot studies, the literature, etc.
+We assume an abundance of ~ 5 individuals in the sampled area at baseline (habitat A).
+Then we specify that habitat B has an abundance of about 6 individuals (`exp(log(5) + 0.18)`).
+We expect a 2% yearly decline (equivalent to `log(0.98)`), and specify that the standard deviation of the point random effect should be 0.1.
+
+```{r}
+coefs <- list()
+coefs$lambda <- c(intercept=log(5), HabitatB=0.18,
+                  Year=log(0.98), Point=0.1)
+```
+
+For detection, we specify a distance $\sigma$ equal to the median of the distance bins, and a removal-based detection probability of about 0.27.
+
+```{r}
+coefs$dist <- c(intercept = log(median(db)))
+coefs$rem <- c(intercept = -1)
+```
+
+Finally, simulate a `gdistremoval` dataset using the `simulate` function:
+
+```{r}
+umf_sim <- simulate("gdistremoval", formulas=forms, design=design, coefs=coefs,
+                    guide=guide, unitsIn='m', dist.breaks=db,
+                    output='abund')
+head(umf_sim)
+```
+
+We can fit the matching model to the dataset to make sure it worked:
+
+```{r}
+template_mod <- gdistremoval(lambdaformula=~Habitat+Year+(1|Point), 
+                             distanceformula=~1, removalformula=~1, 
+                             data=umf_sim, output='abund')
+template_mod
+```
+
+Results are similar to specified coefficients.
+
+```{r}
+truth <- unlist(coefs)
+est <- coef(template_mod)
+est <- c(est[1:3], sigma(template_mod)$sigma, est[4:5])
+cbind(truth=truth, est=est)
+stopifnot(all(round(est, 3) == c(1.490, 0.188, -0.015, 0.167, 3.254, -0.860)))
+```
+
+## Power analysis
+
+We will use the simulated datasets as a template for our power analysis.
+We want to determine power to detect that habitat B has more birds than habitat A, given an expected abundance of 5 in Habitat A and 6 in B.
+We also want to determine our power to detect a declining temporal trend in abundance, given an expected decline of 2% per year.
+As noted earlier, this needs to be done before collecting data.
+What we are doing here is a *post hoc* power analysis which is **not a good idea** normally.
+
+The `powerAnalysis` function can calculate power via simulation.
+The `powerAnalyis` function needs three arguments: our template model from earlier, our chosen parameter values (can be the same as used for the simulation of the template model or different), and the number of simulations to run.
+This may take 10-20 minutes to run.
+
+```{r}
+pa <- powerAnalysis(template_mod, coefs=coefs, nsim=100)
+pa
+stopifnot(all(summary(pa)$Power == c(1, 0.71, 0.81, 1, 1)))
+```
+
+We have mediocre power to detect habitat differences with this study design (0.71).
+However there is reasonable power to detect the yearly trend (0.81).
+Note the power estimates for the intercepts are not meaningful, they represent our power to detect the intercepts are different from 0 (which is not that interesting typically).
+
+# Run analysis on real ACFL data
+
+## Read in the raw data from CSV
+
+```{r}
+acfl <- read.csv("acfl_roanoke_river.csv")
+head(acfl)
+```
+
+Keep only years with complete sampling.
+
+```{r}
+acfl <- acfl[acfl$Year %in% c(2022:2019, 2016:2005), ]
+stopifnot(nrow(acfl) == 4950)
+```
+
+## Format data
+
+For the distance data, each row represents one unique distance/time bin with a count of observed ACFL.
+This can be 0, so no need to fill in the blanks.
+
+```{r}
+distdata <- acfl %>%
+  group_by(TransectName, Point, Year, DOY, Habitat) %>%
+  summarize(dist25=sum(Count[DistanceBin=="L25"], na.rm=TRUE),
+            dist50=sum(Count[DistanceBin=="G25"], na.rm=TRUE), .groups='drop')
+head(distdata)
+```
+
+For removal data the time bins are labelled 3 (0-3 min), 5 (3-5 min), and 10 (5-10 min).
+We need to account for the different time lengths of each period later.
+
+```{r}
+remdata <- acfl %>%
+  group_by(TransectName, Point, Year, DOY, Habitat) %>%
+  summarize(per3=sum(Count[TimeBin==3], na.rm=TRUE),
+            per5=sum(Count[TimeBin==5], na.rm=TRUE),
+            per10=sum(Count[TimeBin==10], na.rm=TRUE), .groups='drop')
+head(remdata)
+```
+Check that the counts of observations match between distance and removal
+
+```{r}
+dsum <- apply(distdata[,6:7], 1, sum)
+rsum <- apply(remdata[,6:8], 1, sum)
+all(dsum==rsum)
+stopifnot(all(dsum == rsum))
+```
+
+Finally, make the `unmarkedFrame`.
+No observation covariates, since there aren't any unique covariates by removal period.
+Site covariates:
+
+```{r}
+site_covs <- distdata[,c("TransectName", "Point", "Year", "DOY", "Habitat")]
+site_covs$Habitat <- factor(site_covs$Habitat, levels=c("River Levee",
+                            "Hardwood Plantation"))
+# Set first year (2005) as Year 0
+site_covs$Year <- site_covs$Year - min(site_covs$Year)
+```
+
+Make the y-matrices:
+
+```{r}
+ydist <- as.matrix(distdata[,6:7])
+yrem <- as.matrix(remdata[,6:8])
+```
+
+Distance breaks and removal period lengths:
+
+```{r}
+db <- c(0,25,50)
+per_lengths <- c(3, 2, 5)
+```
+
+Build the unmarked frame:
+
+```{r}
+umf <- unmarkedFrameGDR(yDistance=ydist, yRemoval=yrem, numPrimary=1,
+                        siteCovs=site_covs, dist.breaks=db, unitsIn='m',
+                        period.lengths=per_lengths)
+head(umf)
+numSites(umf)
+stopifnot(numSites(umf) == 825)
+```
+
+Note there are 825 'sites' - 55 survey points x 15 yearly surveys per point.
+
+
+## Fit candidate models
+
+All models include a random intercept on lambda by `Point`, and all use a half-normal key function for the distance submodel by default.
+
+```{r}
+# NULL
+mod_null <- gdistremoval(lambdaformula=~(1|Point), removalformula=~1,
+                         distanceformula=~1, data=umf, output="abund")
+
+# HAB
+mod_hab <- gdistremoval(lambdaformula=~Habitat + (1|Point), removalformula=~1,
+                        distanceformula=~1, data=umf, output="abund")
+
+# YEAR
+mod_year <- gdistremoval(lambdaformula=~Year + (1|Point), removalformula=~1,
+                         distanceformula=~1, data=umf, output="abund")
+
+# HAB+YEAR
+mod_habyear <- gdistremoval(lambdaformula=~Habitat+Year + (1|Point),
+                            removalformula=~1, distanceformula=~1,
+                            data=umf, output="abund")
+
+# HABxYEAR
+mod_habxyear <- gdistremoval(lambdaformula=~Habitat*Year + (1|Point),
+                            removalformula=~1, distanceformula=~1,
+                            data=umf, output="abund")
+```
+
+## Model selection
+
+Combine the models into an `unmarkedFitList` and rank them using AIC with `modSel`.
+
+```{r}
+mods <- list(null=mod_null, hab=mod_hab, year=mod_year, habyear=mod_habyear, habxyear=mod_habxyear)
+mods <- fitList(fits=mods)
+mods_table <- modSel(mods)
+mods_table <- show(mods_table) # get data frame
+stopifnot(all(rownames(mods_table) == c("habxyear","habyear","year","hab","null")))
+stopifnot(all(mods_table$AIC == c(4322.14, 4329.85, 4330.65, 4366.48, 4367.29)))
+mods_table
+```
+
+Table 1 in paper:
+
+```{r}
+tab1 <- mods_table[,c("nPars", "AIC", "delta")]
+colnames(tab1) <- c("Parameters", "AIC", "ΔAIC")
+tab1 <- cbind(Model=rownames(tab1), tab1)
+rownames(tab1) <- NULL
+knitr::kable(tab1)
+```
+
+Top model is HABxYEAR.
+
+## Goodness of fit for top model
+
+Plot residuals, separately by submodel:
+
+```{r}
+plot(mod_habxyear)
+```
+
+Parametric bootstrap (may take ~10 minutes):
+
+```{r}
+set.seed(123)
+pb <- parboot(mod_habxyear, nsim=30)
+plot(pb)
+```
+
+Model does not appear to fit the data well, but this is a very crude test.
+
+## Inference from top model
+
+Summary table for the top model (Table 2 in paper):
+
+```{r}
+stopifnot(all(round(coef(mod_habxyear),2) ==
+              c(1.84, 0.44, -0.03, -0.05, 2.81, -0.68)))
+mod_habxyear
+```
+
+Statistics reported in the results follow.
+Hardwood plantations initially had higher abundance:
+
+```{r}
+est <- coef(mod_habxyear)
+pct_higher <- round((exp(est[2])-1) * 100)
+names(pct_higher) <- "Percent hardwood higher than bottomland"
+stopifnot(pct_higher == 55)
+pct_higher
+```
+
+Percent yearly decline in bottomland hardwoods:
+
+```{r}
+pct_decline_bottom <- round((1 - exp(est[3]))*100, 1)
+names(pct_decline_bottom) <- "Percent yearly decline bottomland"
+stopifnot(pct_decline_bottom == 2.7)
+pct_decline_bottom
+```
+
+Percent yearly decline in hardwood plantations:
+
+```{r}
+pct_decline_plant <- round((1 - exp(est[3]+est[4]))*100, 1)
+names(pct_decline_plant) <- "Percent yearly decline hardwood plantation"
+stopifnot(pct_decline_plant == 7.0)
+pct_decline_plant
+```
+
+## Build Figure 5
+
+Predicted abundance over time by habitat:
+
+```{r}
+nd <- data.frame(Habitat=factor(levels(umf@siteCovs$Habitat),
+                                levels=levels(umf@siteCovs$Habitat)),
+                Year=rep(0:17, each=2))
+pr <- predict(mod_habxyear, 'lambda', newdata=nd, re.form=NA)
+pr <- cbind(pr, nd)
+
+# Point-level predictions
+pr_point <- predict(mod_habxyear, 'lambda')
+pr_point <- cbind(pr_point, siteCovs(umf))
+```
+
+Build plot:
+
+```{r}
+ggplot(data=pr, aes(x=Year+2005, y=Predicted)) +
+  geom_point(data=pr_point, aes(col=Habitat), alpha=0.2) +
+  geom_ribbon(aes(ymin=lower, ymax=upper, fill=Habitat), alpha=0.2) +
+  geom_line(aes(col=Habitat)) +
+  labs(y="ACFL abundance and 95% CI", x="Year") +
+  theme_bw(base_size=14) +
+  theme(panel.grid=element_blank(), legend.pos=c(0.8,0.8),
+        strip.background=element_rect("white"))
+```
+
+Save plot to file:
+
+```{r}
+tiff("Figure_5.tiff", height=5, width=7, units='in', res=300, compression='lzw')
+ggplot(data=pr, aes(x=Year+2005, y=Predicted)) +
+  geom_point(data=pr_point, aes(col=Habitat), alpha=0.2) +
+  geom_ribbon(aes(ymin=lower, ymax=upper, fill=Habitat), alpha=0.2) +
+  geom_line(aes(col=Habitat)) +
+  labs(y="ACFL abundance and 95% CI", x="Year") +
+  theme_bw(base_size=14) +
+  theme(panel.grid=element_blank(), legend.pos=c(0.8,0.8),
+        strip.background=element_rect("white"))
+dev.off()
+```
+
+## Latent Abundance estimates for each site-year
+
+Based on empirical Bayes methods.
+
+```{r}
+r <- ranef(mod_habxyear)
+stopifnot(round(bup(r)[1],3) == 8.138)
+head(bup(r))
+```
+
+Compare latent abundance estimates among habitat types:
+
+```{r}
+# Function to calculate the mean across sites of each habitat type
+hab_comp <- function(x){
+  c(river = mean(x[umf@siteCovs$Habitat == "River Levee"]),
+    hardwood = mean(x[umf@siteCovs$Habitat == "Hardwood Plantation"]))
+}
+
+set.seed(123)
+# Take samples and calculate mean for each sample, then calculate stats
+out_mat <- predict(r, func=hab_comp)
+hab_mean <- t(apply(out_mat, 1, function(x){
+                      c(mean=mean(x), quantile(x, c(0.025,0.975)))
+                    }
+            ))
+stopifnot(all(round(hab_mean[,1], 2) == c(5.24, 6.06)))
+hab_mean
+```
+
+# Session information
+
+```{r}
+sessionInfo()
+```
