@@ -409,7 +409,7 @@ stopifnot(pct_decline_plant == 7.0)
 pct_decline_plant
 ```
 
-## Build Figure 5
+## Build Figure 4
 
 Predicted abundance over time by habitat:
 
@@ -441,7 +441,7 @@ ggplot(data=pr, aes(x=Year+2005, y=Predicted)) +
 Save plot to file:
 
 ```{r}
-tiff("Figure_5.tiff", height=5, width=7, units='in', res=300, compression='lzw')
+tiff("Figure_4.tiff", height=5, width=7, units='in', res=300, compression='lzw')
 ggplot(data=pr, aes(x=Year+2005, y=Predicted)) +
   geom_point(data=pr_point, aes(col=Habitat), alpha=0.2) +
   geom_ribbon(aes(ymin=lower, ymax=upper, fill=Habitat), alpha=0.2) +
