@@ -419,17 +419,15 @@ nd <- data.frame(Habitat=factor(levels(umf@siteCovs$Habitat),
                 Year=rep(0:17, each=2))
 pr <- predict(mod_habxyear, 'lambda', newdata=nd, re.form=NA)
 pr <- cbind(pr, nd)
-
-# Point-level predictions
-pr_point <- predict(mod_habxyear, 'lambda')
-pr_point <- cbind(pr_point, siteCovs(umf))
+stopifnot(nrow(pr) == 36)
+stopifnot(round(pr$Predicted[1],6) == 6.271459)
+stopifnot(round(pr$Predicted[36],6) == 2.838942)
 ```
 
 Build plot:
 
 ```{r}
 ggplot(data=pr, aes(x=Year+2005, y=Predicted)) +
-  geom_point(data=pr_point, aes(col=Habitat), alpha=0.2) +
   geom_ribbon(aes(ymin=lower, ymax=upper, fill=Habitat), alpha=0.2) +
   geom_line(aes(col=Habitat)) +
   labs(y="ACFL abundance and 95% CI", x="Year") +
@@ -443,7 +441,6 @@ Save plot to file:
 ```{r}
 tiff("Figure_4.tiff", height=5, width=7, units='in', res=300, compression='lzw')
 ggplot(data=pr, aes(x=Year+2005, y=Predicted)) +
-  geom_point(data=pr_point, aes(col=Habitat), alpha=0.2) +
   geom_ribbon(aes(ymin=lower, ymax=upper, fill=Habitat), alpha=0.2) +
   geom_line(aes(col=Habitat)) +
   labs(y="ACFL abundance and 95% CI", x="Year") +
